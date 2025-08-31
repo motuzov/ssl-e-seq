@@ -59,7 +59,8 @@ def train(
     for epoch in range(1, n_epoch + 1):
         sum_loss = 0
         n_loss = 0
-        n_fals = 0
+        n_true = 0
+        n_predicts = 0
         rnn.zero_grad()  # clear the gradient
         batch: PaddedTbBatch
         for batch in loader:
@@ -71,6 +72,9 @@ def train(
             loss = criterion(output, labels)
             with torch.inference_mode():
                 sum_loss += criterion(output, labels)
+                predictions = output.data.max(dim=1, keepdim=True)[1].view(-1)
+                n_predicts += len(predictions)
+                n_true += int(sum((predictions == labels)))
                 n_loss += 1
 
             # optimize parameters
@@ -82,4 +86,4 @@ def train(
         if epoch % report_every == 0:
             print(f"epoch: {epoch}")
             print(sum_loss / n_loss)
-            print(n_fals / n_loss)
+            print(float(n_true) / float(n_predicts))
