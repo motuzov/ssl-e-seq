@@ -1,10 +1,10 @@
 import string
 from pathlib import Path
-import unicodedata
 import torch
 from torch import Tensor
 from typing import Annotated, Any
 from collections import defaultdict
+import pandas as pd
 
 
 # Seqs is a list of 1d tensors various lenghts [torch.Tensor(1, 4, 3), torch.Tensor(2, 1)]
@@ -28,133 +28,92 @@ Texts = list[str]
 # grouped_df.get_group(gidx).loc[: , df.columns != 'g'] in the Seqs Table group releteded to data point data
 
 
-# used as an adapter for TBDataPoint
-NAME_CHARS_SEQ = "name_chars_seq"
-
-
-class TxTbColumnValidaionException(Exception):
-    def __init__(self, col_name, message=""):
-        self.message = message
-        self.col_name = col_name
-        super().__init__(self.message)
-
-    def __str__(self):
-        return f"SeqTb exception: {self.message}"
-
-
-class TbDataSample:
+class TDTSDataSample:
     # Tabular data point represent the table's data for the one group
     # object this type reterning by Dataset __getitem__
     # the type represent sequential data of one data point selected from the grouped table
-    def __init__(self, seqs_dict: SeqDict, label: Any = None, description: Any = None):
-        self._seqs: SeqDict = seqs_dict
-        self._label: Any = label
-        self._description: Any = description
+    def __init__(self, seqs_dict: list[int], label: int | None = None):
+        self._seqs: SeqDict = {col_name: codes for col_name, codes in seqs_dict.items()}
+        self._label: int | None = label
+        self._secs_len = len(self._seqs[next(iter(self._seqs.keys()))])
 
-    def __getitem__(self, seq_name: str) -> Seq:
+    def __getitem__(self, col_name: str) -> Seq:
         # Seq, label, description
         # TODO: Specify the type of the SeqData
-        return self._seqs[seq_name]
+        return self._seqs[col_name]
 
     def __iter__(self):
         return iter(self._seqs.keys())
 
     def __str__(self) -> str:
-        return f"label: {self._label} \n label description: {self._description} \n seqs: {self._seqs}"
+        return f"label: {self._label} \n tb seqs: {self._seqs}"
 
     def __len__(self):
-        return len(self._seqs[next(iter(self._seqs.keys()))])
+        return self._secs_len
 
     @property
     def label(self):
         return self._label
 
-    @property
-    def description(self):
-        return self._description
 
-    # def validate_seq_lengths(gtb_dict: GroupedTbDict):
-    #     for col_name, seqs in self._seq_tb.items():
-    #         if not self._lengths == list(map(len, seqs)):
-    #             raise TxTbColumnValidaionException(
-    #                 col_name=col_name,
-    #                 message="sequence lengths of the group must be the same, but the length of sequence {seqs} in the column {col_name} is distinct from others.",
-    #             )
-
-
-_allowed_characters = string.ascii_letters + " .,;'" + "_"
-
-
-def char2idx(c: str) -> int:
-    if c not in _allowed_characters:
-        c = "_"
-    return _allowed_characters.find(c)
+def encode_categorical_cl(
+    df_tbts_cl: pd.Series,
+) -> tuple[pd.Series, dict[str, dict[str, int]]]:
+    codes, uniqs = df_tbts_cl.factorize()
+    # 0 reserved as the padded idx
+    cod2cat = dict(enumerate(uniqs, start=1))
+    cat2cod = {cat: idx for idx, cat in cod2cat.items()}
+    d = {
+        "cat2cod": cat2cod,
+        "cod2cat": cod2cat,
+    }
+    return pd.Series(codes, dtype=int) + 1, d
 
 
-def line_to_seq(line: str) -> torch.Tensor:
-    return torch.tensor([char2idx(c) for c in line])
-
-
-def load_labeled_names(
-    names_data_path: Path, file_names: list[str]
-) -> tuple[Seqs, list[str], Texts]:
-    labels: list[str] = []
-    seqs: Seqs = []
-    texts: Texts = []
-    for fnanme in file_names:
-        with open(names_data_path / fnanme, mode="r", encoding="utf-8") as f:
-            for line in f.read().strip().split("\n"):
-                seqs.append(line_to_seq(line))
-                labels.append(fnanme)
-                texts.append(line)
-    return seqs, labels, texts
-
-
-def unicodeToAscii(s):
-    return "".join(
-        c
-        for c in unicodedata.normalize("NFD", s)
-        if unicodedata.category(c) != "Mn" and c in _allowed_characters
-    )
-
-
-class SeqsDataset(torch.utils.data.Dataset):
-    def __init__(self, names_data_path: Path) -> None:
-        self._names_data_path = names_data_path
-        self._file_names = sorted(
-            [f_path.name for f_path in names_data_path.glob("*.txt")]
-        )
-        self._l2idx = {name: idx for idx, name in enumerate(self._file_names)}
-        self._seqs, self._labels, self._texts = load_labeled_names(
-            names_data_path, self._file_names
-        )
+class TDTSDataset(torch.utils.data.Dataset):
+    def __init__(
+        self,
+        tbts_path: Path,
+        tbts_groupby_column: str,
+        cat_columns: list[str] = [],
+        num_columns: list[str] = [],
+        labels_path: Path | None = None,
+        label_cl_name="labels",
+    ) -> None:
+        self._tbts_path = tbts_path
+        self._tbts_groupby_column = tbts_groupby_column
+        df_in = pd.read_parquet(tbts_path, engine="pyarrow")
+        _df = pd.DataFrame({tbts_groupby_column: df_in[tbts_groupby_column]})
+        self._encode_decode_dicts = {}
+        for cat_column in cat_columns:
+            encoded_col, d = encode_categorical_cl(df_in[cat_column])
+            self._encode_decode_dicts[cat_column] = d
+            _df[cat_column] = encoded_col
+        self._grouped_df_tdts = _df.groupby(tbts_groupby_column)
+        self._has_labels = False
+        if labels_path:
+            self._labels: pd.DataFrame = pd.read_parquet(labels_path)
+            encoded_col, d = encode_categorical_cl(self._labels[label_cl_name])
+            self._labels.loc[:, label_cl_name] = encoded_col
+            self._encode_decode_label_dicts = d
+        self._ngroups = self._grouped_df_tdts.ngroups
 
     def __len__(self) -> int:
-        return len(self._seqs)
+        return self._ngroups
 
-    def __getitem__(self, idx) -> TbDataSample:
-        label = self._l2idx[self._labels[idx]]
-        seqs_of_one_sample: SeqDict = {NAME_CHARS_SEQ: self._seqs[idx]}
-        return TbDataSample(
-            seqs_dict=seqs_of_one_sample,
+    def __getitem__(self, idx) -> TDTSDataSample:
+        label = self._labels.iloc[idx] if self._has_labels else None
+        return TDTSDataSample(
+            seqs_dict=self._grouped_df_tdts.get_group(idx).to_dict(orient="list"),
             label=label,
-            description=self._labels[idx],
         )
-
-    @property
-    def num_embeddings(self) -> int:
-        return len(_allowed_characters)
-
-    @property
-    def n_calsses(self) -> int:
-        return len(self._l2idx)
 
 
 class PaddedTbBatch:
-    def __init__(self, samples_from_tb: list[TbDataSample]):
+    def __init__(self, samples_from_tb: list[TDTSDataSample]):
         """
         samples of the dataset table collate to the batch:
-        samples_from_tb: list[TbDataSample] -> self._batch: TbBatchSeqs = dict[str, Seqs]
+        samples_from_tb: list[TDTSDataSample] -> self._batch: TbBatchSeqs = dict[str, Seqs]
         the batch key is the column name of the dataset tabel
         batch value are the list of sequences
         each sequence represent sequential data of one data point stored in the dataset table
@@ -195,10 +154,10 @@ class PaddedTbBatch:
         return self._lengths
 
 
-def dummy_collate_fn(samples_from_tb: list[TbDataSample]) -> list[TbDataSample]:
+def dummy_collate_fn(samples_from_tb: list[TDTSDataSample]) -> list[TDTSDataSample]:
     return samples_from_tb
 
 
-def collate_padded_batch_fn(samples_from_tb: list[TbDataSample]) -> PaddedTbBatch:
+def collate_padded_batch_fn(samples_from_tb: list[TDTSDataSample]) -> PaddedTbBatch:
     # batch of padded tensors
     return PaddedTbBatch(samples_from_tb)

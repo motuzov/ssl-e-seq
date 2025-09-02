@@ -1,32 +1,35 @@
 from seq_loader.names_loader import (
-    char2idx,
-    SeqsDataset,
-    TbDataSample,
+    TDTSDataset,
+    TDTSDataSample,
     dummy_collate_fn,
     collate_padded_batch_fn,
-    NAME_CHARS_SEQ,
     PaddedTbBatch,
 )
 import pytest
 from pathlib import Path
 import torch
 from torchmetrics import Accuracy
+from dotenv import load_dotenv
+import os
 
+load_dotenv()
 
-def test_cahr2idx():
-    text = "ab_c"
-    seq_idxs = [char2idx(c) for c in text]
-    assert [0, 1, 57, 2] == seq_idxs
+_NAME_CHARS_COL = "name_chars"
 
 
 @pytest.fixture
 def seqs_dataset():
-    return SeqsDataset(
-        names_data_path=Path("/home/jovyan/work/data/rnn/data-loader/data/names")
+    data_path = Path(os.getenv("DATA_DIR"))
+    filename = "tbts-names"
+    return TDTSDataset(
+        tbts_path=data_path / f"{filename}.parquet",
+        tbts_groupby_column="G",
+        cat_columns=[_NAME_CHARS_COL],
+        labels_path=data_path / f"{filename}-labels.parquet",
     )
 
 
-def test_seqsdataset_init(seqs_dataset: SeqsDataset):
+def test_seqsdataset_init(seqs_dataset: TDTSDataset):
     seqs_dataset._file_names
     assert seqs_dataset._file_names == [
         "Arabic.txt",
@@ -50,31 +53,30 @@ def test_seqsdataset_init(seqs_dataset: SeqsDataset):
     ]
 
 
-def test_dataset_getitm(seqs_dataset: SeqsDataset):
+def test_dataset_getitm(seqs_dataset: TDTSDataset):
     # get the sample(the datapoint ) by idx generated with DataLoader's sampler
-    datapoint: TbDataSample = seqs_dataset[0]
-    seq = datapoint[NAME_CHARS_SEQ]
+    datapoint: TDTSDataSample = seqs_dataset[0]
+    seq = datapoint[_NAME_CHARS_COL]
     assert torch.equal(torch.tensor([36, 7, 14, 20, 17, 24]), seq)
     assert 0 == datapoint.label
-    assert "Arabic.txt" == datapoint.description
 
 
-def test_compatibility_with_dataloader(seqs_dataset: SeqsDataset, capsys):
+def test_compatibility_with_dataloader(seqs_dataset: TDTSDataset, capsys):
     torch.manual_seed(0)
     loader = torch.utils.data.DataLoader(
         dataset=seqs_dataset, shuffle=True, batch_size=4, collate_fn=dummy_collate_fn
     )
-    first_batch_of_sampels: list[TbDataSample] = next(iter(loader))
-    first_sample: TbDataSample = first_batch_of_sampels[0]
+    first_batch_of_sampels: list[TDTSDataSample] = next(iter(loader))
+    first_sample: TDTSDataSample = first_batch_of_sampels[0]
     with capsys.disabled():
         print(f"\nfirst data point in batch:\n{first_sample}\n")
-    s = first_sample[NAME_CHARS_SEQ]
+    s = first_sample[_NAME_CHARS_COL]
     assert torch.equal(torch.tensor([45, 0, 12, 0, 13, 8, 13]), s)
     assert 14 == first_sample.label
     assert "Russian.txt" == first_sample.description
 
 
-def test_collate_padded_batch_fn(seqs_dataset: SeqsDataset, capsys):
+def test_collate_padded_batch_fn(seqs_dataset: TDTSDataset, capsys):
     torch.manual_seed(0)
     loader = torch.utils.data.DataLoader(
         dataset=seqs_dataset,
@@ -99,7 +101,7 @@ def test_collate_padded_batch_fn(seqs_dataset: SeqsDataset, capsys):
     )
 
 
-def test_loader_with_rnn(seqs_dataset: SeqsDataset, capsys):
+def test_loader_with_rnn(seqs_dataset: TDTSDataset, capsys):
     torch.manual_seed(0)
     loader = torch.utils.data.DataLoader(
         dataset=seqs_dataset,
