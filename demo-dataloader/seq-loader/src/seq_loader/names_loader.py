@@ -1,52 +1,42 @@
-import string
 from pathlib import Path
 import torch
-from torch import Tensor
-from typing import Annotated, Any
+from torch import Tensor, tensor
+from typing import Annotated, Iterable, Hashable, Iterator
 from collections import defaultdict
 import pandas as pd
 
 
-# Seqs is a list of 1d tensors various lenghts [torch.Tensor(1, 4, 3), torch.Tensor(2, 1)]
 # 1D Tensor torch.tensor([1, 3, 7])
-# seq: Seq, so seq.dim must be 1
-Seq = Annotated[Tensor, "1D"]
+SeqTensor = Annotated[Tensor, "1D"]
 # sequences (list[Tensor]) – list of variable length sequences, see torch.nn.utils.rnn.pad_sequence
-Seqs = list[Seq]
-# sequence consists of group's values of one column
-# sequences of the one sample
-SeqDict = dict[str, Seq]
-TbBatchSeqs = dict[str, Seqs]
+SequenceOfTensors = list[SeqTensor]
+# TDTS DataFrame consist of
+GroupColumnSequences = dict[Hashable, SeqTensor]
+TDTSDataBatch = dict[Hashable, SequenceOfTensors]
 # SeqsSampleDict = dict[str, Seqs]
-Texts = list[str]
+BatchOfTensors = Annotated[Tensor, "2D"]
 
 
-# data point data
-# dict of
-#  L is length of the sequence
-# where B is the batch size, L is length of the sequence, T is the length of the longest sequence in the batch, *
-# grouped_df.get_group(gidx).loc[: , df.columns != 'g'] in the Seqs Table group releteded to data point data
-
-
-class TDTSDataSample:
-    # Tabular data point represent the table's data for the one group
-    # object this type reterning by Dataset __getitem__
-    # the type represent sequential data of one data point selected from the grouped table
-    def __init__(self, seqs_dict: list[int], label: int | None = None):
-        self._seqs: SeqDict = {col_name: codes for col_name, codes in seqs_dict.items()}
+class TDTSGroupData:
+    # TDTSGroupData stores single-group data corresponding to a single data point in the original dataset.
+    def __init__(
+        self, cl_codes_dict: dict[Hashable, list[int]], label: int | None = None
+    ):
+        self._column_seqs: GroupColumnSequences = {
+            col_name: tensor(codes) for col_name, codes in cl_codes_dict.items()
+        }
         self._label: int | None = label
-        self._secs_len = len(self._seqs[next(iter(self._seqs.keys()))])
+        # All column sequences must be the same size.
+        self._secs_len = len(self._column_seqs[next(iter(self._column_seqs.keys()))])
 
-    def __getitem__(self, col_name: str) -> Seq:
-        # Seq, label, description
-        # TODO: Specify the type of the SeqData
-        return self._seqs[col_name]
+    def __getitem__(self, col_name: Hashable) -> SeqTensor:
+        return self._column_seqs[col_name]
 
-    def __iter__(self):
-        return iter(self._seqs.keys())
+    def __iter__(self) -> Iterator[Hashable]:
+        return iter(self._column_seqs.keys())
 
     def __str__(self) -> str:
-        return f"label: {self._label} \n tb seqs: {self._seqs}"
+        return f"tb seqs: {self._column_seqs} \n label: {self.label}"
 
     def __len__(self):
         return self._secs_len
@@ -58,16 +48,11 @@ class TDTSDataSample:
 
 def encode_categorical_cl(
     df_tbts_cl: pd.Series,
-) -> tuple[pd.Series, dict[str, dict[str, int]]]:
+) -> tuple[pd.Series, dict[int, str]]:
     codes, uniqs = df_tbts_cl.factorize()
     # 0 reserved as the padded idx
-    cod2cat = dict(enumerate(uniqs, start=1))
-    cat2cod = {cat: idx for idx, cat in cod2cat.items()}
-    d = {
-        "cat2cod": cat2cod,
-        "cod2cat": cod2cat,
-    }
-    return pd.Series(codes, dtype=int) + 1, d
+    code2cat_dict: dict[int, str] = dict(enumerate(uniqs, start=1))
+    return pd.Series(codes, dtype=int) + 1, code2cat_dict
 
 
 class TDTSDataset(torch.utils.data.Dataset):
@@ -83,52 +68,63 @@ class TDTSDataset(torch.utils.data.Dataset):
         self._tbts_path = tbts_path
         self._tbts_groupby_column = tbts_groupby_column
         df_in = pd.read_parquet(tbts_path, engine="pyarrow")
-        _df = pd.DataFrame({tbts_groupby_column: df_in[tbts_groupby_column]})
-        self._encode_decode_dicts = {}
+        df = pd.DataFrame({tbts_groupby_column: df_in[tbts_groupby_column]})
+        self._columns_decoder = {}
         for cat_column in cat_columns:
-            encoded_col, d = encode_categorical_cl(df_in[cat_column])
-            self._encode_decode_dicts[cat_column] = d
-            _df[cat_column] = encoded_col
-        self._grouped_df_tdts = _df.groupby(tbts_groupby_column)
+            encoded_col, code2cat_dict = encode_categorical_cl(df_in[cat_column])
+            self._columns_decoder[cat_column] = code2cat_dict
+            df[cat_column] = encoded_col
+        self._loc_cols_filter = ~df.columns.isin([tbts_groupby_column])
+        self._grouped_df_tdts = df.groupby(tbts_groupby_column)
         self._has_labels = False
         if labels_path:
+            self._label_cl_name = label_cl_name
+            self._has_labels = True
             self._labels: pd.DataFrame = pd.read_parquet(labels_path)
-            encoded_col, d = encode_categorical_cl(self._labels[label_cl_name])
+            encoded_col, code2cat_dict = encode_categorical_cl(
+                self._labels[label_cl_name]
+            )
             self._labels.loc[:, label_cl_name] = encoded_col
-            self._encode_decode_label_dicts = d
+            self._labels_decoder = code2cat_dict
         self._ngroups = self._grouped_df_tdts.ngroups
 
     def __len__(self) -> int:
         return self._ngroups
 
-    def __getitem__(self, idx) -> TDTSDataSample:
-        label = self._labels.iloc[idx] if self._has_labels else None
-        return TDTSDataSample(
-            seqs_dict=self._grouped_df_tdts.get_group(idx).to_dict(orient="list"),
+    def __getitem__(self, idx) -> TDTSGroupData:
+        label = (
+            self._labels.iloc[idx][self._label_cl_name] if self._has_labels else None
+        )
+        df_g = self._grouped_df_tdts.get_group(idx).loc[:, self._loc_cols_filter]
+        return TDTSGroupData(
+            cl_codes_dict=df_g.to_dict(orient="list"),
             label=label,
         )
 
+    def num_embeddings(self, column_name: Hashable) -> int:
+        return len(self._columns_decoder[column_name])
 
-class PaddedTbBatch:
-    def __init__(self, samples_from_tb: list[TDTSDataSample]):
+    @property
+    def n_calsses(self):
+        return len(self._labels_decoder)
+
+
+class PaddedTDTSDBatch:
+    def __init__(self, samples_from_tb: list[TDTSGroupData]):
         """
-        samples of the dataset table collate to the batch:
-        samples_from_tb: list[TDTSDataSample] -> self._batch: TbBatchSeqs = dict[str, Seqs]
-        the batch key is the column name of the dataset tabel
-        batch value are the list of sequences
-        each sequence represent sequential data of one data point stored in the dataset table
-        and we save the original lengths of the sequences into self._lengths before calling pad_sequence
+        collates grouped table samples to the batch of tensors:
+        samples_from_tb: list[TDTSDataSample] -> self._batch: TDTSDataBatch
         """
         # save lengths befor padding
         self._lengths: list[int] = []
-        self._batch: TbBatchSeqs = defaultdict(Seqs)
-        self._padadded_batch: dict[str, Tensor] = defaultdict(Tensor)
+        self._batch: TDTSDataBatch = defaultdict(SequenceOfTensors)
+        self._padadded_batch: dict[Hashable, BatchOfTensors] = defaultdict(Tensor)
         self._labels: list = []
         for sample in samples_from_tb:
             self._lengths.append(len(sample))
             self._labels.append(sample.label)
             for column in sample:
-                s = sample[column]
+                s: SeqTensor = sample[column]
                 self._batch[column].append(s)
 
         for column in self._batch.keys():
@@ -136,10 +132,10 @@ class PaddedTbBatch:
                 self._batch[column], batch_first=True
             )
 
-    def __getitem__(self, column):
-        return self._padadded_batch[column]
+    def __getitem__(self, column_name: Hashable):
+        return self._padadded_batch[column_name]
 
-    def __iter__(self) -> int:
+    def __iter__(self) -> Iterable[Hashable]:
         return iter(self._batch.keys())
 
     def __len__(self):
@@ -154,10 +150,10 @@ class PaddedTbBatch:
         return self._lengths
 
 
-def dummy_collate_fn(samples_from_tb: list[TDTSDataSample]) -> list[TDTSDataSample]:
+def dummy_collate_fn(samples_from_tb: list[TDTSGroupData]) -> list[TDTSGroupData]:
     return samples_from_tb
 
 
-def collate_padded_batch_fn(samples_from_tb: list[TDTSDataSample]) -> PaddedTbBatch:
+def collate_padded_batch_fn(samples_from_tb: list[TDTSGroupData]) -> PaddedTDTSDBatch:
     # batch of padded tensors
-    return PaddedTbBatch(samples_from_tb)
+    return PaddedTDTSDBatch(samples_from_tb)
