@@ -3,29 +3,28 @@ import torch
 import torch.nn.functional as F
 import time
 from seq_loader.names_loader import (
-    char2idx,
-    SeqsDataset,
-    TbDataSample,
-    dummy_collate_fn,
+    TDTSDataset,
     collate_padded_batch_fn,
-    NAME_CHARS_SEQ,
-    PaddedTbBatch,
+    PaddedTDTSDBatch,
+    ColEmbeddingsParams,
+    PADDING_VALUE,
 )
+
+from seq_loader.nn import CatColumnsDataEncoder
 
 
 class CharRNN(nn.Module):
-    def __init__(self, num_embeddings, embedding_dim, hidden_size, n_classes):
+    def __init__(
+        self, embedding_dims: dict[str, ColEmbeddingsParams], h_size, n_classes
+    ):
         super().__init__()
-        self.embedding = nn.Embedding(
-            num_embeddings=num_embeddings, embedding_dim=embedding_dim, padding_idx=0
-        )
-        self.rnn = nn.LSTM(self.embedding.embedding_dim, hidden_size)
-        print(2 * hidden_size)
-        self.h2o = nn.Linear(in_features=2 * hidden_size, out_features=n_classes)
+        self.encoder = CatColumnsDataEncoder(embedding_dims)
+        self.lstm = nn.LSTM(self.encoder.embedding_dim, h_size, batch_first=True)
+        self.h2o = nn.Linear(in_features=2 * h_size, out_features=n_classes)
 
-    def forward(self, batch):
-        input_e = self.embedding(batch)
-        lstm_h, _ = self.rnn(input_e)
+    def forward(self, batch: PaddedTDTSDBatch):
+        encoded_input = self.encoder(batch)
+        lstm_h, _ = self.lstm(encoded_input)
         h_n = lstm_h[:, -1]
         avg_pool = torch.mean(lstm_h, 1)
         rnn_out = torch.cat((avg_pool, h_n), 1)
@@ -34,9 +33,8 @@ class CharRNN(nn.Module):
 
 
 def train(
-    rnn,
-    seqs_dataset: SeqsDataset,
-    device,
+    model,
+    tdts_dataset: TDTSDataset,
     n_epoch=10,
     n_batch_size=64,
     report_every=50,
@@ -46,44 +44,45 @@ def train(
     Learn on a batch of training_data for a specified number of iterations and reporting thresholds
     """
     # Keep track of losses for plotting
-    rnn.train()
-    optimizer = torch.optim.Adam(rnn.parameters(), lr=learning_rate)
+    model.train()
+    optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
 
     loader = torch.utils.data.DataLoader(
-        dataset=seqs_dataset,
+        dataset=tdts_dataset,
         shuffle=True,
         batch_size=n_batch_size,
         collate_fn=collate_padded_batch_fn,
     )
+    torch.manual_seed(0)
     criterion = torch.nn.CrossEntropyLoss()
     for epoch in range(1, n_epoch + 1):
         sum_loss = 0
         n_loss = 0
         n_true = 0
         n_predicts = 0
-        rnn.zero_grad()  # clear the gradient
-        batch: PaddedTbBatch
+        n_batches = 0
+        model.zero_grad()  # clear the gradient
+        batch: PaddedTDTSDBatch
         for batch in loader:
-            first_col: str = next(iter(batch))
-            padded_t_batch = batch[first_col]
-            padded_t_batch = padded_t_batch.to(device)
-            labels = batch.labels.to(device)
-            output = rnn(padded_t_batch)
-            loss = criterion(output, labels)
+            output = model(batch)
+
+            # print(batch.labels)
+            # print(output)
+            loss = criterion(output, batch.labels)
             with torch.inference_mode():
-                sum_loss += criterion(output, labels)
+                sum_loss += criterion(output, batch.labels)
                 predictions = output.data.max(dim=1, keepdim=True)[1].view(-1)
                 n_predicts += len(predictions)
-                n_true += int(sum((predictions == labels)))
+                n_true += int(sum((predictions == batch.labels)))
                 n_loss += 1
 
             # optimize parameters
             loss.backward()
-            nn.utils.clip_grad_norm_(rnn.parameters(), 3)
+            # nn.utils.clip_grad_norm_(model.parameters(), 3)
             optimizer.step()
             optimizer.zero_grad()
 
         if epoch % report_every == 0:
             print(f"epoch: {epoch}")
-            print(sum_loss / n_loss)
-            print(float(n_true) / float(n_predicts))
+            print(f"cross_entr={sum_loss / n_loss}")
+            print(f"accur={float(n_true) / float(n_predicts)}")

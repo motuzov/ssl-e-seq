@@ -4,6 +4,7 @@ from torch import Tensor, tensor
 from typing import Annotated, Iterable, Hashable, Iterator
 from collections import defaultdict
 import pandas as pd
+from dataclasses import dataclass
 
 
 # 1D Tensor torch.tensor([1, 3, 7])
@@ -15,12 +16,15 @@ GroupColumnSequences = dict[Hashable, SeqTensor]
 TDTSDataBatch = dict[Hashable, SequenceOfTensors]
 # SeqsSampleDict = dict[str, Seqs]
 BatchOfTensors = Annotated[Tensor, "2D"]
+PADDING_VALUE = 0
 
 
 class TDTSGroupData:
     # TDTSGroupData stores single-group data corresponding to a single data point in the original dataset.
     def __init__(
-        self, cl_codes_dict: dict[Hashable, list[int]], label: int | None = None
+        self,
+        cl_codes_dict: dict[Hashable, list[int]],
+        label: int | None = None,
     ):
         self._column_seqs: GroupColumnSequences = {
             col_name: tensor(codes) for col_name, codes in cl_codes_dict.items()
@@ -47,12 +51,18 @@ class TDTSGroupData:
 
 
 def encode_categorical_cl(
-    df_tbts_cl: pd.Series,
+    df_tbts_cl: pd.Series, start=0
 ) -> tuple[pd.Series, dict[int, str]]:
     codes, uniqs = df_tbts_cl.factorize()
     # 0 reserved as the padded idx
-    code2cat_dict: dict[int, str] = dict(enumerate(uniqs, start=1))
-    return pd.Series(codes, dtype=int) + 1, code2cat_dict
+    code2cat_dict: dict[int, str] = dict(enumerate(uniqs, start=start))
+    return pd.Series(codes, dtype=int) + start, code2cat_dict
+
+
+@dataclass(frozen=True)
+class ColEmbeddingsParams:
+    num_embeddings: int
+    embedding_dim: int
 
 
 class TDTSDataset(torch.utils.data.Dataset):
@@ -70,8 +80,11 @@ class TDTSDataset(torch.utils.data.Dataset):
         df_in = pd.read_parquet(tbts_path, engine="pyarrow")
         df = pd.DataFrame({tbts_groupby_column: df_in[tbts_groupby_column]})
         self._columns_decoder = {}
+        self.cat_columns = cat_columns
         for cat_column in cat_columns:
-            encoded_col, code2cat_dict = encode_categorical_cl(df_in[cat_column])
+            encoded_col, code2cat_dict = encode_categorical_cl(
+                df_in[cat_column], start=1
+            )
             self._columns_decoder[cat_column] = code2cat_dict
             df[cat_column] = encoded_col
         self._loc_cols_filter = ~df.columns.isin([tbts_groupby_column])
@@ -101,8 +114,23 @@ class TDTSDataset(torch.utils.data.Dataset):
             label=label,
         )
 
-    def num_embeddings(self, column_name: Hashable) -> int:
-        return len(self._columns_decoder[column_name])
+    @property
+    def n_categories(self) -> dict[str, int]:
+        return {
+            str(column_name): len(code2cat_dict)
+            for column_name, code2cat_dict in self._columns_decoder.items()
+        }
+
+    def cat_col_embeddings_params(
+        self, col_embedding_dims
+    ) -> dict[str, ColEmbeddingsParams]:
+        return {
+            str(column_name): ColEmbeddingsParams(
+                num_embeddings=len(code2cat_dict) + 1,
+                embedding_dim=col_embedding_dims[column_name],
+            )
+            for column_name, code2cat_dict in self._columns_decoder.items()
+        }
 
     @property
     def n_calsses(self):
@@ -129,11 +157,13 @@ class PaddedTDTSDBatch:
 
         for column in self._batch.keys():
             self._padadded_batch[column] = torch.nn.utils.rnn.pad_sequence(
-                self._batch[column], batch_first=True
+                self._batch[column],
+                batch_first=True,
+                padding_value=float(PADDING_VALUE),
             )
 
-    def __getitem__(self, column_name: Hashable):
-        return self._padadded_batch[column_name]
+    def __getitem__(self, column: Hashable):
+        return self._padadded_batch[column]
 
     def __iter__(self) -> Iterable[Hashable]:
         return iter(self._batch.keys())

@@ -5,7 +5,10 @@ from seq_loader.names_loader import (
     collate_padded_batch_fn,
     PaddedTDTSDBatch,
     SeqTensor,
+    ColEmbeddingsParams,
+    PADDING_VALUE,
 )
+from seq_loader.nn import CatColumnsDataEncoder
 import pytest
 from pathlib import Path
 from dotenv import load_dotenv
@@ -20,7 +23,7 @@ from torchmetrics import Accuracy
 load_dotenv()
 
 
-_NAME_CHARS_COL = "name_chars"
+_NAME_CHARS_COL = str("name_chars")
 
 
 @pytest.fixture
@@ -60,8 +63,8 @@ def test_compatibility_with_dataloader(tdts_dataset: TDTSDataset, capsys):
     with capsys.disabled():
         print(f"\nfirst data point in batch:\n{first_sample}\n")
     s = first_sample[_NAME_CHARS_COL]
-    assert torch.equal(torch.tensor([24, 8, 32, 8, 25, 15, 25]), s)
-    assert first_sample.label == 15
+    assert torch.equal(tensor([24, 8, 32, 8, 25, 15, 25]), s)
+    assert first_sample.label == 14
     # assert len(first_sample) == 1
 
 
@@ -75,7 +78,9 @@ def test_collate_padded_batch_fn(tdts_dataset: TDTSDataset, capsys):
     )
     first_batch: PaddedTDTSDBatch = next(iter(loader))
     first_col_name = next(iter(first_batch))
+    lenght = len(tdts_dataset)
     with capsys.disabled():
+        print(tdts_dataset[lenght - 1])
         print(f"Padded batch of cl={first_col_name}: \n{first_batch[first_col_name]}\n")
         print(f"len(columns num) : {len(first_batch)}")
         print(f"Labels: {first_batch.labels}")
@@ -83,6 +88,7 @@ def test_collate_padded_batch_fn(tdts_dataset: TDTSDataset, capsys):
 
 
 def test_loader_with_rnn(tdts_dataset: TDTSDataset, capsys):
+    # TODO: Need to break down into unit tests
     torch.manual_seed(0)
     loader = torch.utils.data.DataLoader(
         dataset=tdts_dataset,
@@ -91,12 +97,18 @@ def test_loader_with_rnn(tdts_dataset: TDTSDataset, capsys):
         collate_fn=collate_padded_batch_fn,
     )
     first_batch: PaddedTDTSDBatch = next(iter(loader))
-    first_col: str = next(iter(first_batch))
+    first_col: str = str(next(iter(first_batch)))
     batch = first_batch[first_col]
+    embedding_dim = 4
+    col_embedding_dims = dict.fromkeys(tdts_dataset.cat_columns, embedding_dim)
+    emb_params = tdts_dataset.cat_col_embeddings_params(col_embedding_dims)
+    column_emb_parms: ColEmbeddingsParams = emb_params[_NAME_CHARS_COL]
+    encoder = CatColumnsDataEncoder(emb_params)
+    ecoder_out = encoder(first_batch)
     embedding = torch.nn.Embedding(
-        num_embeddings=tdts_dataset.num_embeddings(_NAME_CHARS_COL),
-        embedding_dim=4,
-        padding_idx=0,
+        num_embeddings=column_emb_parms.num_embeddings,
+        embedding_dim=column_emb_parms.embedding_dim,
+        padding_idx=PADDING_VALUE,
     )
     input_e = embedding(batch)
     h_size = 8
@@ -109,6 +121,7 @@ def test_loader_with_rnn(tdts_dataset: TDTSDataset, capsys):
     avg_pool = torch.mean(lstm_h, 1)
     h_n = lstm_h[:, -1]
     with capsys.disabled():
+        print("\n")
         print(batch)
         print(input_e)
         print("LSTM output B x L x H:")
