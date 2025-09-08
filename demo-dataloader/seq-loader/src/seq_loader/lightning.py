@@ -20,7 +20,10 @@ class LitLSTM(L.LightningModule):
     ):
         super().__init__()
         self.lstm = TBDTSLstm(
-            embedding_dims=embedding_dims, h_size=h_size, n_classes=n_classes
+            embedding_dims=embedding_dims,
+            h_size=h_size,
+            n_classes=n_classes,
+            device=self.device,
         )
         self.loss = torch.nn.CrossEntropyLoss()
         self.lr = lr
@@ -29,8 +32,8 @@ class LitLSTM(L.LightningModule):
     def training_step(self, batch: PaddedTDTSDBatch, batch_idx):
         # training_step defines the train loop.
         output = self.lstm(batch)
-        loss = self.loss(output, batch.labels)
-        self.accuracy.update(output, batch.labels)
+        loss = self.loss(output, batch.labels.to(self.device))
+        self.accuracy.update(output, batch.labels.to(self.device))
         self.log("train_acc_step", self.accuracy, on_epoch=True)
         return loss
 

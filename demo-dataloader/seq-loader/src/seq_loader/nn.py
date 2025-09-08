@@ -9,14 +9,18 @@ from seq_loader.names_loader import (
 
 
 class CatColumnsDataEncoder(nn.Module):
-    def __init__(self, embedding_dims: dict[str, ColEmbeddingsParams]) -> None:
+    def __init__(
+        self, embedding_dims: dict[str, ColEmbeddingsParams], device=None
+    ) -> None:
         super().__init__()
+        self.device = device
         self.embeddings = nn.ModuleDict(
             {
                 col: nn.Embedding(
                     num_embeddings=col_embedings_params.num_embeddings,
                     embedding_dim=col_embedings_params.embedding_dim,
                     padding_idx=PADDING_VALUE,
+                    device=device,
                 )
                 for col, col_embedings_params in embedding_dims.items()
             }
@@ -25,7 +29,7 @@ class CatColumnsDataEncoder(nn.Module):
     def forward(self, padded_batch: PaddedTDTSDBatch):
         return torch.cat(
             [
-                self.embeddings[col_name](padded_batch[col_name])
+                self.embeddings[col_name](padded_batch[col_name]).to("cuda")
                 for col_name in self.embeddings.keys()
             ]
         )
@@ -37,12 +41,20 @@ class CatColumnsDataEncoder(nn.Module):
 
 class TBDTSLstm(nn.Module):
     def __init__(
-        self, embedding_dims: dict[str, ColEmbeddingsParams], h_size, n_classes
+        self,
+        embedding_dims: dict[str, ColEmbeddingsParams],
+        h_size,
+        n_classes,
+        device=None,
     ):
         super().__init__()
-        self.encoder = CatColumnsDataEncoder(embedding_dims)
-        self.lstm = nn.LSTM(self.encoder.embedding_dim, h_size, batch_first=True)
-        self.h2o = nn.Linear(in_features=2 * h_size, out_features=n_classes)
+        self.encoder = CatColumnsDataEncoder(embedding_dims, device=device)
+        self.lstm = nn.LSTM(
+            self.encoder.embedding_dim, h_size, batch_first=True, device=device
+        )
+        self.h2o = nn.Linear(
+            in_features=2 * h_size, out_features=n_classes, device=device
+        )
 
     def forward(self, batch: PaddedTDTSDBatch):
         encoded_input = self.encoder(batch)

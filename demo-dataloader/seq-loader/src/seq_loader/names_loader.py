@@ -152,14 +152,12 @@ class PaddedTDTSDBatch:
             self._lengths.append(len(sample))
             self._labels.append(sample.label)
             for column in sample:
-                s: SeqTensor = sample[column]
+                s: SeqTensor = sample[column].to(device="cuda")
                 self._batch[column].append(s)
 
         for column in self._batch.keys():
             self._padadded_batch[column] = torch.nn.utils.rnn.pad_sequence(
-                self._batch[column],
-                batch_first=True,
-                padding_value=float(PADDING_VALUE),
+                self._batch[column], batch_first=True
             )
 
     def __getitem__(self, column: Hashable):
