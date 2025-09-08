@@ -33,3 +33,22 @@ class CatColumnsDataEncoder(nn.Module):
     @property
     def embedding_dim(self):
         return sum([e.embedding_dim for e in self.embeddings.values()])
+
+
+class TBDTSLstm(nn.Module):
+    def __init__(
+        self, embedding_dims: dict[str, ColEmbeddingsParams], h_size, n_classes
+    ):
+        super().__init__()
+        self.encoder = CatColumnsDataEncoder(embedding_dims)
+        self.lstm = nn.LSTM(self.encoder.embedding_dim, h_size, batch_first=True)
+        self.h2o = nn.Linear(in_features=2 * h_size, out_features=n_classes)
+
+    def forward(self, batch: PaddedTDTSDBatch):
+        encoded_input = self.encoder(batch)
+        lstm_h, _ = self.lstm(encoded_input)
+        h_n = lstm_h[:, -1]
+        avg_pool = torch.mean(lstm_h, 1)
+        rnn_out = torch.cat((avg_pool, h_n), 1)
+        output = self.h2o(rnn_out)
+        return output
