@@ -1,42 +1,51 @@
-import torch.nn as nn
 import torch
-import torch.nn.functional as F
-import time
 from seq_loader.names_loader import (
-    TDTSDataset,
-    collate_padded_batch_fn,
     PaddedTDTSDBatch,
     ColEmbeddingsParams,
 )
-
-from seq_loader.nn import CatColumnsDataEncoder, TBDTSLstm
-from torchmetrics.classification import MulticlassAccuracy
 import lightning as L
+from seq_loader.nn import TBDTSLstm
+from torchmetrics.classification import MulticlassAccuracy
 
 
-class LitLSTM(L.LightningModule):
+class LitBaselineLSTM(L.LightningModule):
     def __init__(
         self, embedding_dims: dict[str, ColEmbeddingsParams], h_size, n_classes, lr=1e-3
     ):
         super().__init__()
-        self.lstm = TBDTSLstm(
-            embedding_dims=embedding_dims,
-            h_size=h_size,
-            n_classes=n_classes,
-            device=self.device,
-        )
+        self.b_lstm = TBDTSLstm(embedding_dims, h_size, n_classes)
         self.loss = torch.nn.CrossEntropyLoss()
         self.lr = lr
         self.accuracy = MulticlassAccuracy(num_classes=n_classes, average="micro")
 
     def training_step(self, batch: PaddedTDTSDBatch, batch_idx):
         # training_step defines the train loop.
-        output = self.lstm(batch)
-        loss = self.loss(output, batch.labels.to(self.device))
-        self.accuracy.update(output, batch.labels.to(self.device))
-        self.log("train_acc_step", self.accuracy, on_epoch=True)
+        output = self.b_lstm(batch)
+        loss = self.loss(output, batch.labels)
+        acc = self.accuracy(output, batch.labels)
+        metrics = {"acc": acc, "cross_entr": loss}
+        self.log_dict(
+            dictionary=metrics, on_epoch=True, batch_size=len(batch), prog_bar=True
+        )
         return loss
 
+    def validation_step(self, batch, batch_idx):
+        output = self.b_lstm(batch)
+        loss = self.loss(output, batch.labels)
+        acc = self.accuracy(output, batch.labels)
+        metrics = {"val_acc": acc, "val_cross_entr": loss}
+        self.log_dict(
+            dictionary=metrics, on_epoch=True, batch_size=len(batch), prog_bar=True
+        )
+
     def configure_optimizers(self):
-        optimizer = torch.optim.Adam(self.lstm.parameters(), lr=self.lr)
+        optimizer = torch.optim.Adam(self.parameters(), lr=self.lr)
         return optimizer
+
+    def transfer_batch_to_device(
+        self, batch, device, dataloader_idx
+    ) -> PaddedTDTSDBatch:
+        if isinstance(batch, PaddedTDTSDBatch):
+            # move all tensors in your custom data structure to the device
+            batch.to(device)
+        return batch

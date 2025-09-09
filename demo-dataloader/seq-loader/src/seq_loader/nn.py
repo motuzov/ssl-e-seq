@@ -1,11 +1,6 @@
 import torch.nn as nn
 import torch
-from torch.nn.utils.rnn import pack_padded_sequence, pad_packed_sequence
-from seq_loader.names_loader import (
-    ColEmbeddingsParams,
-    PaddedTDTSDBatch,
-    PADDING_VALUE,
-)
+from seq_loader.names_loader import ColEmbeddingsParams, PaddedTDTSDBatch
 
 
 class CatColumnsDataEncoder(nn.Module):
@@ -19,8 +14,6 @@ class CatColumnsDataEncoder(nn.Module):
                 col: nn.Embedding(
                     num_embeddings=col_embedings_params.num_embeddings,
                     embedding_dim=col_embedings_params.embedding_dim,
-                    padding_idx=PADDING_VALUE,
-                    device=device,
                 )
                 for col, col_embedings_params in embedding_dims.items()
             }
@@ -29,7 +22,7 @@ class CatColumnsDataEncoder(nn.Module):
     def forward(self, padded_batch: PaddedTDTSDBatch):
         return torch.cat(
             [
-                self.embeddings[col_name](padded_batch[col_name]).to("cuda")
+                self.embeddings[col_name](padded_batch[col_name])
                 for col_name in self.embeddings.keys()
             ]
         )

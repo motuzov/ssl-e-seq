@@ -6,7 +6,6 @@ from collections import defaultdict
 import pandas as pd
 from dataclasses import dataclass
 
-
 # 1D Tensor torch.tensor([1, 3, 7])
 SeqTensor = Annotated[Tensor, "1D"]
 # sequences (list[Tensor]) – list of variable length sequences, see torch.nn.utils.rnn.pad_sequence
@@ -16,7 +15,6 @@ GroupColumnSequences = dict[Hashable, SeqTensor]
 TDTSDataBatch = dict[Hashable, SequenceOfTensors]
 # SeqsSampleDict = dict[str, Seqs]
 BatchOfTensors = Annotated[Tensor, "2D"]
-PADDING_VALUE = 0
 
 
 class TDTSGroupData:
@@ -54,7 +52,6 @@ def encode_categorical_cl(
     df_tbts_cl: pd.Series, start=0
 ) -> tuple[pd.Series, dict[int, str]]:
     codes, uniqs = df_tbts_cl.factorize()
-    # 0 reserved as the padded idx
     code2cat_dict: dict[int, str] = dict(enumerate(uniqs, start=start))
     return pd.Series(codes, dtype=int) + start, code2cat_dict
 
@@ -82,6 +79,7 @@ class TDTSDataset(torch.utils.data.Dataset):
         self._columns_decoder = {}
         self.cat_columns = cat_columns
         for cat_column in cat_columns:
+            # The dict starts from 1 because 0 is used for the padded element
             encoded_col, code2cat_dict = encode_categorical_cl(
                 df_in[cat_column], start=1
             )
@@ -126,6 +124,7 @@ class TDTSDataset(torch.utils.data.Dataset):
     ) -> dict[str, ColEmbeddingsParams]:
         return {
             str(column_name): ColEmbeddingsParams(
+                # The dict keys start from 1, and 0 is a default value for padded elements, so:
                 num_embeddings=len(code2cat_dict) + 1,
                 embedding_dim=col_embedding_dims[column_name],
             )
@@ -147,17 +146,20 @@ class PaddedTDTSDBatch:
         self._lengths: list[int] = []
         self._batch: TDTSDataBatch = defaultdict(SequenceOfTensors)
         self._padadded_batch: dict[Hashable, BatchOfTensors] = defaultdict(Tensor)
-        self._labels: list = []
+        labels: list = []
         for sample in samples_from_tb:
             self._lengths.append(len(sample))
-            self._labels.append(sample.label)
+            labels.append(sample.label)
             for column in sample:
-                s: SeqTensor = sample[column].to(device="cuda")
+                s: SeqTensor = sample[column]
                 self._batch[column].append(s)
+        self._labels: Tensor = tensor(labels)
 
         for column in self._batch.keys():
+            # The default value for padded elements is 0
             self._padadded_batch[column] = torch.nn.utils.rnn.pad_sequence(
-                self._batch[column], batch_first=True
+                self._batch[column],
+                batch_first=True,
             )
 
     def __getitem__(self, column: Hashable):
@@ -171,11 +173,17 @@ class PaddedTDTSDBatch:
 
     @property
     def labels(self) -> Tensor:
-        return torch.tensor(self._labels)
+        return self._labels
 
     @property
     def lengths(self) -> list[int]:
         return self._lengths
+
+    def to(self, device):
+        self._padadded_batch = {
+            col: t.to(device=device) for col, t in self._padadded_batch.items()
+        }
+        self._labels = self._labels.to(device=device)
 
 
 def dummy_collate_fn(samples_from_tb: list[TDTSGroupData]) -> list[TDTSGroupData]:
